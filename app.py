@@ -111,7 +111,7 @@ login_gate()
 
 # Ensure theme_choice exists even if session state was reset
 if "theme_choice" not in st.session_state:
-    st.session_state.theme_choice = "Dark"
+    st.session_state["theme_choice"] = "Light"
 
 # --- UPDATED THEME VARIABLES (Complete) ---
 if st.session_state.get("theme_choice", "Dark") == "Dark":
