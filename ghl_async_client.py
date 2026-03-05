@@ -517,9 +517,9 @@ class GHLAsyncClient:
         )
         for dr in today_res: dr['Type'] = 'Today'
 
-        # 2. Fetch Weekly
-        start_of_week = today - timedelta(days=today.weekday()) # Monday
-        end_of_week = start_of_week + timedelta(days=4) # Friday
+        # 2. Fetch Weekly (Last 7 Days)
+        start_of_week = today - timedelta(days=6)
+        end_of_week = today # Saturday/current day
         weekly_res = await self.fetch_consultant_metrics(
             start_date=start_of_week.strftime('%Y-%m-%d'),
             end_date=end_of_week.strftime('%Y-%m-%d'),
