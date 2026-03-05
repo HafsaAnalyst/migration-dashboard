@@ -526,8 +526,9 @@ class GHLAsyncClient:
         week_start_str = ws.strftime('%Y-%m-%d')
         week_end_str = we.strftime('%Y-%m-%d')
         
-        print(f"DEBUG: Consultant Pulse - Today: {today_str}")
-        print(f"DEBUG: Consultant Pulse - Weekly Window (Rolling 7D): {week_start_str} to {week_end_str}")
+        print(f"\n[GHL DEBUG] CONSULTANT PULSE CALCULATION")
+        print(f"--- Today: {today_str}")
+        print(f"--- Weekly Rolling (7D): {week_start_str} to {week_end_str}")
         
         # For a true pulse check, fetch payments for the current week period
         pulse_payments = await self.fetch_payments(week_start_str, today_str)
