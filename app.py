@@ -368,6 +368,10 @@ with tabs[1]:
 
         df_agg_filt = df_agg_raw[df_agg_raw['Country'].isin(selected_meta_countries)].copy() if selected_meta_countries else df_agg_raw.copy()
         
+        # Robustness: If filtered data is empty but raw data is not, fallback to all (prevents disappearance on date change)
+        if df_agg_filt.empty and not df_agg_raw.empty:
+            df_agg_filt = df_agg_raw.copy()
+        
         if df_agg_filt.empty:
             st.info(f"No Meta data matches the selected Country filter: {selected_meta_countries}")
             
@@ -442,10 +446,8 @@ with tabs[1]:
 
             st.divider()
 
-            st.divider()
-
-            # 7. Landing Page Health
-            st.markdown(f"### {title_prefix} **7. Landing Page Health**")
+            # 6. Landing Page Health
+            st.markdown(f"### {title_prefix} **6. Landing Page Health**")
             t_lp = df_f['Landing page views'].sum() if 'Landing page views' in df_f.columns else 0
             drop_off = (1 - t_lp / t_links) * 100 if t_links > 0 else 0
             l_col1, l_col2 = st.columns([1, 2])
@@ -457,8 +459,8 @@ with tabs[1]:
 
             st.divider()
 
-            # 8. Conversion Type Breakdown
-            st.markdown(f"### {title_prefix} **8. Conversion Type Breakdown**")
+            # 7. Conversion Type Breakdown
+            st.markdown(f"### {title_prefix} **7. Conversion Type Breakdown**")
             with st.expander(f"🔍 View All Conversion Actions ({title_prefix.strip()})", expanded=False):
                 all_actions = {}
                 if '_actions' in df_f.columns:
@@ -472,8 +474,8 @@ with tabs[1]:
 
             st.divider()
 
-            # 9. Meta Campaigns Table
-            st.markdown(f"### {title_prefix} **9. Meta Campaigns**")
+            # 8. Meta Campaigns Table
+            st.markdown(f"### {title_prefix} **8. Meta Campaigns**")
             with st.expander(f"📂 View Detailed Campaigns ({title_prefix.strip()})", expanded=False if title_prefix else True):
                 agg_rules = {
                     'Amount spent': 'sum', 'Results': 'sum', 'Impressions': 'sum', 
@@ -503,7 +505,11 @@ with tabs[1]:
                 dd2 = df_daily_raw[df_daily_raw['Country']==mc2] if 'Country' in df_daily_raw.columns else pd.DataFrame()
                 render_meta_content(df2, dd2, f"📊 {mc2}")
         else:
+            # Fallback for daily data as well
             df_daily_filt = df_daily_raw[df_daily_raw['Country'].isin(selected_meta_countries)] if 'Country' in df_daily_raw.columns and selected_meta_countries else df_daily_raw
+            if df_daily_filt.empty and not df_daily_raw.empty:
+                df_daily_filt = df_daily_raw.copy()
+                
             render_meta_content(df_agg_filt, df_daily_filt)
             
     else:
@@ -1070,13 +1076,20 @@ with tabs[6]:
 
     # --- WEEKLY SECTION ---
     st.markdown("### **📆 Weekly Consultant Capacity (Last 7 Rolling Days)**")
-    print(f"DEBUG: Rendering Weekly Tab - {len(df_w)} records found.")
+    
+    # User requested print statements for tracking this window
+    print(f"\n[CONSULTANT TRACKER] Weekly Window: Rolling 7 Days")
+    print(f"--- Data Points: {len(df_w)}")
+    if not df_w.empty:
+        top_c = df_w.sort_values('total_appointments', ascending=False).iloc[0]['consultant_name']
+        print(f"--- Peak Performance: {top_c} ({df_w.sort_values('total_appointments', ascending=False).iloc[0]['total_appointments']} appts)")
+
     if not df_w.empty:
         fig_w = px.bar(df_w.sort_values('total_appointments'), x="total_appointments", y="consultant_name", 
-                        orientation='h', title="Appointments per Consultant (Weekly)", color="total_appointments", color_continuous_scale="Greens", labels={'consultant_name': 'Consultant', 'total_appointments': 'Appointments'})
+                        orientation='h', title="Appointments per Consultant (Weekly Rolling 7D)", color="total_appointments", color_continuous_scale="Greens", labels={'consultant_name': 'Consultant', 'total_appointments': 'Appointments'})
         st.plotly_chart(apply_chart_style(fig_w), use_container_width=True)
         
-        st.markdown("#### **Weekly Leaderboard**")
+        st.markdown("#### **Weekly Leaderboard (Rolling 7D)**")
         cols_w = ['consultant_name', 'total_appointments', 'amount_paid', 'confirmed', 'show', 'no_show', 'unconfirmed', 'country']
         available_cols_w = [c for c in cols_w if c in df_w.columns]
         df_w_disp = df_w[available_cols_w].sort_values('total_appointments', ascending=False)
