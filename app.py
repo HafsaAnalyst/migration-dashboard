@@ -20,6 +20,8 @@ from ghl_async_client import ghl_client
 from meta_async_client import fetch_meta_data
 from ga4_async_client import fetch_ga4_data
 from gsc_async_client import fetch_gsc_data
+import statsmodels.api as sm
+import pytz
 
 # --- PAGE CONFIG ---
 st.set_page_config(
@@ -179,7 +181,7 @@ def load_all_intelligence(start_date, end_date):
     # Convert dates to strings for API compatibility
     start_str = start_date.strftime('%Y-%m-%d')
     end_str = end_date.strftime('%Y-%m-%d')
-
+    print(f"LOADER DEBUG: Requesting data for range {start_str} to {end_str}")
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
@@ -365,6 +367,9 @@ with tabs[1]:
             meta_comparison_mode = st.toggle("Side-by-Side Comparison", key="meta_comp_toggle")
 
         df_agg_filt = df_agg_raw[df_agg_raw['Country'].isin(selected_meta_countries)].copy() if selected_meta_countries else df_agg_raw.copy()
+        
+        if df_agg_filt.empty:
+            st.info(f"No Meta data matches the selected Country filter: {selected_meta_countries}")
             
         def render_meta_content(df_f, df_daily_f, title_prefix=""):
             # 1. Performance KPIs
@@ -409,21 +414,20 @@ with tabs[1]:
 
             st.divider()
 
-            # 4. Performance Analysis
+            # 4. Campaign Performance Analysis
             st.markdown(f"### {title_prefix} **4. Campaign Performance Analysis**")
             if 'Frequency' in df_f.columns:
                 df_fat = df_f.copy()
                 df_fat['Frequency'] = pd.to_numeric(df_fat['Frequency'], errors='coerce')
                 df_fat = df_fat[df_fat['Frequency'] > 0]
-                if not df_fat.empty:
-                    import statsmodels.api as sm
+                if len(df_fat) > 1:
                     fig_fat = px.scatter(df_fat, x="Frequency", y="CTR (link click-through rate)", 
                                         size="Amount spent", color="Campaign", hover_name="Campaign",
                                         trendline="ols", trendline_color_override="red",
                                         title=f"{title_prefix} CTR% vs. Frequency Fatigue")
                     st.plotly_chart(apply_chart_style(fig_fat), use_container_width=True)
                 else:
-                    st.info("Insufficient frequency data for fatigue analysis.")
+                    st.info("Insufficient data points (min 2) for frequency fatigue trendline analysis.")
 
             st.divider()
 
@@ -437,38 +441,6 @@ with tabs[1]:
             st.plotly_chart(apply_chart_style(fig_strat), use_container_width=True)
 
             st.divider()
-
-            # 6. Engagement-to-Conversion Decay
-            st.markdown(f"### {title_prefix} **6. Engagement-to-Conversion Decay**")
-            if not df_daily_f.empty:
-                df_d = df_daily_f.copy()
-                df_d['Date_DT'] = pd.to_datetime(df_d['Date'])
-                if df_d['Date_DT'].nunique() > 14:
-                    min_d = df_d['Date_DT'].min()
-                    c1_d = df_d[df_d['Date_DT'] < min_d + timedelta(days=7)]
-                    c2_d = df_d[df_d['Date_DT'] > min_d + timedelta(days=14)]
-                    
-                    if not c1_d.empty and not c2_d.empty:
-                        if 'Result Rate Raw' in df_d.columns:
-                            rr1 = c1_d['Result Rate Raw'].mean() * 100
-                            rr2 = c2_d['Result Rate Raw'].mean() * 100
-                        else:
-                            rr1 = (c1_d['Results'].sum() / c1_d['Impressions'].sum() * 100) if c1_d['Impressions'].sum() > 0 else 0
-                            rr2 = (c2_d['Results'].sum() / c2_d['Impressions'].sum() * 100) if c2_d['Impressions'].sum() > 0 else 0
-                        
-                        # Handle NaNs
-                        rr1 = 0 if pd.isna(rr1) else rr1
-                        rr2 = 0 if pd.isna(rr2) else rr2
-                        
-                        d1, d2 = st.columns(2)
-                        with d1: okr_scorecard("Result Rate (D1-7)", f"{rr1:.2f}%")
-                        with d2: okr_scorecard("Result Rate (D14-21)", f"{rr2:.2f}%", delta=f"{rr2-rr1:.2f}%")
-                    else:
-                        st.info("Insufficient metrics in the 7-day windows for decay analysis.")
-                else:
-                    st.info("Min 14 days required for decay analysis.")
-            else:
-                st.info("No daily time-series data found.")
 
             st.divider()
 
@@ -1097,7 +1069,8 @@ with tabs[6]:
     st.divider()
 
     # --- WEEKLY SECTION ---
-    st.markdown("### **📆 Weekly Consultant Capacity**")
+    st.markdown("### **📆 Weekly Consultant Capacity (Last 7 Rolling Days)**")
+    print(f"DEBUG: Rendering Weekly Tab - {len(df_w)} records found.")
     if not df_w.empty:
         fig_w = px.bar(df_w.sort_values('total_appointments'), x="total_appointments", y="consultant_name", 
                         orientation='h', title="Appointments per Consultant (Weekly)", color="total_appointments", color_continuous_scale="Greens", labels={'consultant_name': 'Consultant', 'total_appointments': 'Appointments'})
