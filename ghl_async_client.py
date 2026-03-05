@@ -520,11 +520,14 @@ class GHLAsyncClient:
         # Today
         today_str = today_dt.strftime('%Y-%m-%d')
         
-        # Weekly (Monday to Friday as per mkdashboarddf.py)
-        ws = today_dt - timedelta(days=today_dt.weekday())
-        we = ws + timedelta(days=4)
+        # Weekly (Rolling Last 7 Days as per user request)
+        ws = today_dt - timedelta(days=6)
+        we = today_dt
         week_start_str = ws.strftime('%Y-%m-%d')
         week_end_str = we.strftime('%Y-%m-%d')
+        
+        print(f"DEBUG: Consultant Pulse - Today: {today_str}")
+        print(f"DEBUG: Consultant Pulse - Weekly Window (Rolling 7D): {week_start_str} to {week_end_str}")
         
         # For a true pulse check, fetch payments for the current week period
         pulse_payments = await self.fetch_payments(week_start_str, today_str)
@@ -537,11 +540,11 @@ class GHLAsyncClient:
         )
         for dr in today_res: dr['Type'] = 'Today'
         
-        # 2. Fetch Weekly (Current Work Week)
+        # 2. Fetch Weekly (Last 7 Rolling Days)
         weekly_res = await self.fetch_consultant_metrics(
             start_date=week_start_str, end_date=week_end_str,
             opportunities=opportunities, contacts=contacts, payments=pulse_payments,
-            working_days=5
+            working_days=7
         )
         for dr in weekly_res: dr['Type'] = 'Weekly'
         
