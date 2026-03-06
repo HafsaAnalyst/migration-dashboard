@@ -1,303 +1,99 @@
 """
-Async Meta (Facebook) API Client - High-performance data fetching
+THE MIGRATION - PRODUCTION MARKETING INTELLIGENCE DASHBOARD
+Single-file consolidated deployment for Streamlit Community Cloud.
 """
-import aiohttp
-import asyncio
-from datetime import datetime
-from typing import Dict, List, Optional, Any
-import json
 
 import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.express as px
+import plotly.graph_objects as go
+import asyncio
+from datetime import datetime, date, timedelta
+import json
+import traceback
+import os
+import sys
 
-# ==================== CONFIGURATION ====================
-try:
-    ACCESS_TOKEN = st.secrets["meta"]["access_token"]
-    APP_ID = st.secrets["meta"]["app_id"]
-    APP_SECRET = st.secrets["meta"]["app_secret"]
-    AD_ACCOUNT_ID = st.secrets["meta"]["ad_account_id"]
-except:
-    ACCESS_TOKEN = "EAAWYAtm7TKsBQ4zb1LndIDLktPy7psadJZATb9Gc9X0R53xsE8PfqMxSAWQrd56dEZAvCPstNSoeS952V1jiZAYZBXmu5O6IZC1pyAPEuDZAOZBR6GiuVBZA6ihZA5NuBhZCR7ZBLcbPW8QBhVBP8EcUZAWosdKVhzCbg2Ib06R4NeHA3VXDupEmL7xKnVCjJKL6XMIxoGQg"
-    APP_ID = "1574512893840555"
-    APP_SECRET = "2f2984631ab5a1dd0606a8d09e45f100"
-    AD_ACCOUNT_ID = "act_600555439172695"
+# Import Async Clients
+from ghl_async_client import GHLAsyncClient
+from meta_async_client import MetaAsyncClient, fetch_meta_data
+from ga4_async_client import fetch_ga4_data
+from gsc_async_client import fetch_gsc_data
+import statsmodels.api as sm
+import pytz
 
-BASE_URL = "https://graph.facebook.com/v18.0"
+# --- PAGE CONFIG ---
+st.set_page_config(
+    page_title="The Migration | Marketing Performance Dashboard",
+    page_icon="🎯",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
+# --- AUTHENTICATION ---
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
 
-class MetaAsyncClient:
-    """Async Meta Ads API Client"""
-    
-    def __init__(self):
-        self._session: Optional[aiohttp.ClientSession] = None
-        self._campaigns_cache: Optional[List[Dict]] = None
-        self._last_fetch: Optional[datetime] = None
-    
-    async def get_session(self) -> aiohttp.ClientSession:
-        """Get or create aiohttp session"""
-        if self._session is None or self._session.closed:
-            connector = aiohttp.TCPConnector(limit=50, limit_per_host=20)
-            timeout = aiohttp.ClientTimeout(total=60)
-            self._session = aiohttp.ClientSession(
-                connector=connector,
-                timeout=timeout
-            )
-        return self._session
-    
-    async def close(self):
-        """Close the session"""
-        if self._session and not self._session.closed:
-            await self._session.close()
-    
-    async def fetch_campaigns(self, start_date: str, end_date: str, breakdown: str = None) -> List[Dict]:
-        """Fetch all campaign insights
-        
-        Args:
-            start_date: Start date in YYYY-MM-DD format
-            end_date: End date in YYYY-MM-DD format
-            breakdown: Optional breakdown dimension (e.g., 'country' for country-level data)
-        """
-        # Cache key includes breakdown to support different views
-        cache_key = f"{start_date}_{end_date}_{breakdown}"
-        if self._campaigns_cache is not None and hasattr(self, '_cache_key') and self._cache_key == cache_key:
-            print(f"DEBUG: Returning cached Meta campaigns for {cache_key}")
-            return self._campaigns_cache
-        
-        print(f"DEBUG: Fetching Meta Campaigns - Start: {start_date}, End: {end_date}, Breakdown: {breakdown}")
-        session = await self.get_session()
-        
-        # Meta Ads API endpoint
-        url = f"{BASE_URL}/{AD_ACCOUNT_ID}/insights"
-        
-        # Build fields list
-        fields = (
-            'campaign_name,campaign_id,reach,frequency,impressions,spend,cpm,clicks,ctr,cpc,'
-            'inline_link_clicks,inline_link_click_ctr,outbound_clicks,'
-            'actions,action_values,cost_per_action_type,'
-            'video_thruplay_watched_actions,video_p50_watched_actions,video_p95_watched_actions'
-        )
-        
-        params = {
-            'access_token': ACCESS_TOKEN,
-            'level': 'campaign',
-            'time_range': json.dumps({'since': start_date, 'until': end_date}),
-            'fields': fields,
-            'limit': 500
-        }
-        # Exact filter as mkdashboarddf.py
-        params['filtering'] = json.dumps([{'field': 'campaign.effective_status', 'operator': 'IN', 'value': ['ACTIVE', 'PAUSED']}])
-
-
-        if breakdown == 'country':
-            params['breakdowns'] = 'country'
-        
-        all_data = []
-        after_cursor = None
-        page_count = 0
-        
-        while True:
-            query_params = params.copy()
-            if after_cursor:
-                query_params['after'] = after_cursor
+def login_gate():
+    if not st.session_state.authenticated:
+        # Try to get credentials from secrets, or use defaults for local testing
+        try:
+            auth_user = st.secrets["auth"]["username"]
+            auth_pass = st.secrets["auth"]["password"]
+        except:
+            # Fallback for local testing
+            auth_user = "themigration"
+            auth_pass = "1900clients"
             
-            try:
-                async with session.get(url, params=query_params) as response:
-                    text = await response.text()
-                    if response.status != 200:
-                        print(f"[META ERROR] {response.status}: {text}")
-                        # If breakdown failed, we still want to finish with what we have
-                        break
-                    
-                    data = json.loads(text)
-                    campaigns = data.get('data', [])
-                    
-                    if not campaigns:
-                        if page_count == 0:
-                            print(f"[META] No campaigns found for this range/breakdown.")
-                        break
-                    
-                    all_data.extend(campaigns)
-                    page_count += 1
-                    print(f"DEBUG: Fetched {len(campaigns)} Meta records (Total: {len(all_data)})")
-                    
-                    # Next page
-                    after_cursor = data.get('paging', {}).get('cursors', {}).get('after')
-                    if not after_cursor:
-                        break
-            except Exception as e:
-                print(f"[META EXCEPTION] {e}")
-                break
-        
-        # Process the data
-        processed = []
-        for entry in all_data:
-            actions = entry.get('actions', [])
-            costs = entry.get('cost_per_action_type', [])
-            
-            def get_act(name):
-                return sum(float(a['value']) for a in actions if a['action_type'] == name)
-            
-            def get_cost(name):
-                return next((float(a['value']) for a in costs if a['action_type'] == name), 0)
+        st.markdown("<div style='text-align: center; padding-top: 100px;'>", unsafe_allow_html=True)
+        st.title("🔐 Marketing Performance Login")
+        user = st.text_input("Username")
+        pw = st.text_input("Password", type="password")
+        if st.button("Login"):
+            if user == auth_user and pw == auth_pass:
+                st.session_state.authenticated = True
+                st.rerun()
+            else:
+                st.error("Invalid credentials")
+        st.markdown("</div>", unsafe_allow_html=True)
+        st.stop()
 
-            # Video Retention
-            thruplays = sum(float(a['value']) for a in entry.get('video_thruplay_watched_actions', []))
-            if thruplays == 0:
-                thruplays = get_act('video_thruplay') + get_act('video_view_15_sec') + get_act('video_played_to_completion')
+login_gate()
 
-            v3s_final = get_act('video_view')
-            
-            v50 = sum(float(a['value']) for a in entry.get('video_p50_watched_actions', []))
-            v95 = sum(float(a['value']) for a in entry.get('video_p95_watched_actions', []))
-            
-            # Outbound Clicks
-            outbound = sum(float(a['value']) for a in entry.get('outbound_clicks', []))
-            lp_views = get_act('landing_page_view')
-            
-            # Results logic
-            lead_forms = get_act('lead')
-            web_conversions = sum(float(a['value']) for a in actions if 'offsite_conversion' in (a.get('action_type') or ''))
-            final_results = int(lead_forms if lead_forms > 0 else (lead_forms + web_conversions))
-            
-            processed.append({
-                'Campaign': entry.get('campaign_name'),
-                'Campaign ID': entry.get('campaign_id'),
-                'Results': final_results,
-                'Reach': int(entry.get('reach', 0)),
-                'Frequency': float(entry.get('frequency', 0)),
-                'Impressions': int(entry.get('impressions', 0)),
-                'Amount spent': float(entry.get('spend', 0)),
-                'CPM': float(entry.get('cpm', 0)),
-                'Clicks': int(entry.get('clicks', 0)),
-                'CTR (all)': float(entry.get('ctr', 0)),
-                'CPC': float(entry.get('cpc', 0)),
-                'Link clicks': int(entry.get('inline_link_clicks', 0)),
-                'CTR (link click-through rate)': float(entry.get('inline_link_click_ctr', 0)),
-                'Outbound clicks': int(outbound),
-                'Landing page views': int(lp_views),
-                '3s Hold': int(v3s_final),
-                'Thruplays': int(thruplays),
-                '50% Hook': int(v50),
-                '95% Hook': int(v95),
-                'Leads': int(lead_forms),
-                'Web Conversions': int(web_conversions),
-                'Cost per lead': get_cost('lead') or get_cost('offsite_conversion.fb_pixel_purchase') or 0,
-                'Country': entry.get('country', 'Unknown'),
-                '_actions': {a['action_type']: float(a['value']) for a in actions}
-            })
-        
-        self._campaigns_cache = processed
-        self._cache_key = cache_key
-        self._last_fetch = datetime.now()
-        return processed
-    
-    async def fetch_campaigns_daily(self, start_date: str, end_date: str) -> List[Dict]:
-        """Fetch daily campaign insights for trend analysis"""
-        session = await self.get_session()
-        url = f"{BASE_URL}/{AD_ACCOUNT_ID}/insights"
-        fields = 'date_start,results,impressions,spend,actions'
-        params = {
-            'access_token': ACCESS_TOKEN,
-            'level': 'account',
-            'time_range': json.dumps({'since': start_date, 'until': end_date}),
-            'time_increment': 1,
-            'breakdowns': 'country',
-            'fields': fields,
-            'limit': 500,
-            'filtering': json.dumps([{'field': 'campaign.effective_status', 'operator': 'IN', 'value': ['ACTIVE', 'PAUSED']}])
-        }
-        
-        all_data = []
-        after_cursor = None
-        while True:
-            qp = params.copy()
-            if after_cursor: qp['after'] = after_cursor
-            try:
-                async with session.get(url, params=qp) as response:
-                    raw_text = await response.text()
-                    if response.status != 200:
-                        print(f"Meta API Error (Daily Insights): {response.status} - {raw_text}")
-                        return all_data # Return partial data on error
-                    data = json.loads(raw_text)
-                    insights = data.get('data', [])
-                    if not insights: break
-                    all_data.extend(insights)
-                    after_cursor = data.get('paging', {}).get('cursors', {}).get('after')
-                    if not after_cursor: break
-            except Exception as e:
-                print(f"Error fetching daily campaigns: {e}")
-                return all_data # Return partial data on exception
-            
-        processed = []
-        for entry in all_data:
-            results = sum(float(a.get('value', 0)) for a in entry.get('actions', []))
-            
-            # If the API gave us a list of results, don't try to float() the list
-            if 'results' in entry and isinstance(entry['results'], list):
-                # Optionally you could parse the list, but 'actions' fallback is safer
-                pass
-            elif 'results' in entry and isinstance(entry['results'], (str, int, float)):
-                results = float(entry['results'])
-                
-            processed.append({
-                'Date': entry.get('date_start'),
-                'Results': results,
-                'Impressions': int(entry.get('impressions', 0)),
-                'Amount spent': float(entry.get('spend', 0)),
-                'Country': entry.get('country', 'Unknown'),
-                'Result Rate Raw': (results / int(entry['impressions'])) if int(entry.get('impressions', 0)) > 0 else 0
-            })
-        return processed
-    
-    async def fetch_campaigns_by_country(self, start_date: str, end_date: str) -> List[Dict]:
-        """Fetch campaign data broken down by country"""
-        return await self.fetch_campaigns(start_date, end_date, breakdown='country')
-    
-    def invalidate_cache(self):
-        """Clear cache"""
-        self._campaigns_cache = None
-        self._cache_key = None
-        self._last_fetch = None
+# --- THEME MANAGEMENT ---
+if "theme_choice" not in st.session_state:
+    st.session_state.theme_choice = "Dark"
 
+with st.sidebar:
+    st.markdown("""
+        <div style="padding: 0.5rem 0 1.5rem; border-bottom: 1px solid #2d2f31; margin-bottom: 1.5rem;">
+            <span style="color: white; font-weight: bold; font-size: 1.5rem;">The Migration</span>
+        </div>
+    """, unsafe_allow_html=True)
+    
+    # Global Date Filter
+    # Default to Nov 1st 2025 as per project history
+    default_start = date(2025, 11, 1)
+    default_end = date.today()
+    date_range = st.date_input("Select Range", [default_start, default_end])
+    
+    st.markdown("<div style='margin-top: auto; padding-top: 1rem; border-top: 1px solid #2d2f31;'></div>", unsafe_allow_html=True)
+    choice = st.radio("Appearance", ["Dark", "Light"], index=0 if st.session_state.theme_choice == "Dark" else 1)
+    if choice != st.session_state.theme_choice:
+        st.session_state.theme_choice = choice
+        st.rerun()
 
-async def fetch_meta_data(start_date: str, end_date: str, breakdown: Optional[str] = 'country') -> Dict[str, Any]:
-    """Fetch all Meta data with locally scoped client"""
-    client = MetaAsyncClient()
-    campaigns, daily = await asyncio.gather(
-        client.fetch_campaigns(start_date, end_date, breakdown=breakdown),
-        client.fetch_campaigns_daily(start_date, end_date)
-    )
-    
-    campaign_results = campaigns if isinstance(campaigns, list) else []
-    daily_results = daily if isinstance(daily, list) else []
-    
-    # Calculate totals with safety defaults
-    total_spend = sum(c.get('Amount spent', 0) for c in campaign_results)
-    total_leads = sum(c.get('Results', 0) for c in campaign_results)
-    total_impressions = sum(int(c.get('Impressions', 0)) for c in campaign_results)
-    total_clicks = sum(int(c.get('Clicks', 0)) for c in campaign_results)
-    
-    print(f"DEBUG: Meta Summary - Campaigns: {len(campaign_results)}, Daily: {len(daily_results)}, Leads: {total_leads}")
-    
-    return {
-        'campaigns': campaign_results,
-        'daily': daily_results,
-        'summary': {
-            'total_spend': total_spend,
-            'total_leads': total_leads,
-            'total_impressions': total_impressions,
-            'total_clicks': total_clicks,
-            'avg_ctr': (total_clicks / total_impressions * 100) if total_impressions > 0 else 0,
-            'cpl': (total_spend / total_leads) if total_leads > 0 else 0,
-            'campaign_count': len(campaign_results)
-        },
-        'fetched_at': datetime.now().isoformat()
-    }
-
-
-if __name__ == "__main__":
-    async def test():
-        result = await fetch_meta_data('2025-11-01', '2026-02-28')
-        print(f"Fetched {len(result['campaigns'])} campaigns")
-        print(f"Summary: {result['summary']}")
-    
-    asyncio.run(test())
+# --- THEME VARIABLES ---
+if st.session_state.theme_choice == "Dark":
+    bg_color, surface_color, text_color = "#0f172a", "#1e293b", "#f8fafc"
+    secondary_text, accent, border_color = "#94a3b8", "#2dd4bf", "#334155"
+    table_bg, chart_bg, plotly_template = "#000000", "#1e293b", "plotly_dark"
+    card_shadow = "0 10px 15px -3px rgba(0,0,0,0.3)"
+    chart_text_color = "#f8fafc"
+else:
+    bg_color, surface_color, text_color = "#f1f5f9", "#ffffff", "#000000"
+    secondary_text, accent, border_color = "#475569", "#0d9488", "#cbd5e1"
+    table_bg, chart_bg, plotly_template = "#ffffff", "#ffffff", "plotly_white"
+    card_shadow = "0 4px 6px -1px rgba(0, 0, 0, 0.1)"
+    chart_text_color = "#000000"
