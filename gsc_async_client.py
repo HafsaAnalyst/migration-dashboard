@@ -252,13 +252,14 @@ class GSCAsyncClient:
         self._last_fetch = None
 
 
-# Global instance
-gsc_client = GSCAsyncClient()
-
-
 async def fetch_gsc_data(start_date: str, end_date: str) -> Dict[str, Any]:
-    """Fetch all GSC data"""
-    return await gsc_client.fetch_all_data(start_date, end_date)
+    """Fetch all GSC data with locally scoped client"""
+    client = GSCAsyncClient()
+    try:
+        return await client.fetch_all_data(start_date, end_date)
+    finally:
+        # GSC doesnt strictly have a close() yet but good practice
+        if hasattr(client, 'close'): await client.close()
 
 
 if __name__ == "__main__":
