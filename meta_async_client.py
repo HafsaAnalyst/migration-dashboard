@@ -83,8 +83,8 @@ class MetaAsyncClient:
             'fields': fields,
             'limit': 500
         }
-        # Looser filter to ensure we get data
-        params['filtering'] = json.dumps([{'field': 'campaign.effective_status', 'operator': 'IN', 'value': ['ACTIVE', 'PAUSED', 'ARCHIVED', 'DELETED', 'IN_PROCESS', 'WITH_ISSUES']}])
+        # Exact filter as mkdashboarddf.py
+        params['filtering'] = json.dumps([{'field': 'campaign.effective_status', 'operator': 'IN', 'value': ['ACTIVE', 'PAUSED']}])
 
 
         if breakdown == 'country':
@@ -92,6 +92,7 @@ class MetaAsyncClient:
         
         all_data = []
         after_cursor = None
+        page_count = 0
         
         while True:
             query_params = params.copy()
@@ -100,30 +101,30 @@ class MetaAsyncClient:
             
             try:
                 async with session.get(url, params=query_params) as response:
+                    text = await response.text()
                     if response.status != 200:
-                        text = await response.text()
-                        print(f"Error {response.status}: {text}")
+                        print(f"[META ERROR] {response.status}: {text}")
+                        # If breakdown failed, we still want to finish with what we have
                         break
                     
-                    data = await response.json()
+                    data = json.loads(text)
                     campaigns = data.get('data', [])
                     
                     if not campaigns:
+                        if page_count == 0:
+                            print(f"[META] No campaigns found for this range/breakdown.")
                         break
                     
                     all_data.extend(campaigns)
-                    print(f"DEBUG: Fetched {len(campaigns)} Meta records (Total so far: {len(all_data)})")
+                    page_count += 1
+                    print(f"DEBUG: Fetched {len(campaigns)} Meta records (Total: {len(all_data)})")
                     
-                    # Check for pagination
-                    paging = data.get('paging', {})
-                    cursors = paging.get('cursors', {})
-                    after_cursor = cursors.get('after')
-                    
+                    # Next page
+                    after_cursor = data.get('paging', {}).get('cursors', {}).get('after')
                     if not after_cursor:
                         break
-                        
             except Exception as e:
-                print(f"Error fetching campaigns: {e}")
+                print(f"[META EXCEPTION] {e}")
                 break
         
         # Process the data
@@ -194,7 +195,6 @@ class MetaAsyncClient:
         session = await self.get_session()
         url = f"{BASE_URL}/{AD_ACCOUNT_ID}/insights"
         fields = 'date_start,results,impressions,spend,actions'
-        
         params = {
             'access_token': ACCESS_TOKEN,
             'level': 'account',
@@ -202,7 +202,8 @@ class MetaAsyncClient:
             'time_increment': 1,
             'breakdowns': 'country',
             'fields': fields,
-            'limit': 500
+            'limit': 500,
+            'filtering': json.dumps([{'field': 'campaign.effective_status', 'operator': 'IN', 'value': ['ACTIVE', 'PAUSED']}])
         }
         
         all_data = []
@@ -228,9 +229,15 @@ class MetaAsyncClient:
             
         processed = []
         for entry in all_data:
-            results = sum(float(a['value']) for a in entry.get('actions', [])) # Fallback if results field doesn't work well
-            if 'results' in entry:
+            results = sum(float(a.get('value', 0)) for a in entry.get('actions', []))
+            
+            # If the API gave us a list of results, don't try to float() the list
+            if 'results' in entry and isinstance(entry['results'], list):
+                # Optionally you could parse the list, but 'actions' fallback is safer
+                pass
+            elif 'results' in entry and isinstance(entry['results'], (str, int, float)):
                 results = float(entry['results'])
+                
             processed.append({
                 'Date': entry.get('date_start'),
                 'Results': results,
@@ -252,15 +259,12 @@ class MetaAsyncClient:
         self._last_fetch = None
 
 
-# Global instance
-meta_client = MetaAsyncClient()
-
-
 async def fetch_meta_data(start_date: str, end_date: str, breakdown: Optional[str] = 'country') -> Dict[str, Any]:
-    """Fetch all Meta data"""
+    """Fetch all Meta data with locally scoped client"""
+    client = MetaAsyncClient()
     campaigns, daily = await asyncio.gather(
-        meta_client.fetch_campaigns(start_date, end_date, breakdown=breakdown),
-        meta_client.fetch_campaigns_daily(start_date, end_date)
+        client.fetch_campaigns(start_date, end_date, breakdown=breakdown),
+        client.fetch_campaigns_daily(start_date, end_date)
     )
     
     campaign_results = campaigns if isinstance(campaigns, list) else []
