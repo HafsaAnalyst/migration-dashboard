@@ -495,13 +495,21 @@ class GHLAsyncClient:
                     except: pass
 
             countries = set()
+            sources = set()
             for cid in unique_cids:
                 contact = contact_map.get(cid, {})
                 phone = contact.get("phone")
                 countries.add(get_country_from_phone(phone))
             
+            # Extract sources from appointments
+            for e in cal_events:
+                s = e.get("source") or e.get("meta", {}).get("source")
+                if s and isinstance(s, str):
+                    sources.add(s)
+            
             country_list = [c for c in countries if c != "Other"]
             final_country = ", ".join(sorted(country_list)) if country_list else "Other"
+            final_source = ", ".join(sorted(list(sources))) if sources else "Direct"
 
             consultant_results.append({
                 "consultant_name": name,
@@ -513,6 +521,7 @@ class GHLAsyncClient:
                 "no_show": no_show,
                 "unconfirmed": unconfirmed,
                 "country": final_country,
+                "source": final_source,
                 "busy_slots": len(cal_events),
                 "empty_spaces": max(0, total_capacity - len(cal_events)),
                 "max_capacity": total_capacity,
@@ -521,22 +530,29 @@ class GHLAsyncClient:
         
         return consultant_results
 
-    async def fetch_consultant_pulse(self, opportunities: List[Dict], contacts: List[Dict] = None, payments: List[Dict] = None) -> Dict[str, List[Dict]]:
-        """Fetch Today and Weekly metrics for scoreboard with independent range-aware lookups (Sydney Time)"""
+    async def fetch_consultant_pulse(self, opportunities: List[Dict], contacts: List[Dict] = None, payments: List[Dict] = None, reference_date: str = None) -> Dict[str, List[Dict]]:
+        """Fetch Today and Weekly metrics with optional reference_date (Sydney Time)"""
         tz = pytz.timezone('Australia/Sydney')
-        today_dt = datetime.now(tz).date()
         
-        # Today
+        if reference_date:
+            try:
+                today_dt = datetime.strptime(reference_date, '%Y-%m-%d').date()
+            except:
+                today_dt = datetime.now(tz).date()
+        else:
+            today_dt = datetime.now(tz).date()
+            
+        # Today (or Selected End Date)
         today_str = today_dt.strftime('%Y-%m-%d')
         
-        # Weekly (Rolling Last 7 Days as per user request)
+        # Weekly (Rolling 7 Days ending on today_dt)
         ws = today_dt - timedelta(days=6)
         we = today_dt
         week_start_str = ws.strftime('%Y-%m-%d')
         week_end_str = we.strftime('%Y-%m-%d')
         
         print(f"\n[GHL DEBUG] CONSULTANT PULSE CALCULATION")
-        print(f"--- Today: {today_str}")
+        print(f"--- Reference Date (Today): {today_str}")
         print(f"--- Weekly Rolling (7D): {week_start_str} to {week_end_str}")
         
         # For a true pulse check, fetch payments for the current week period
@@ -601,7 +617,13 @@ class GHLAsyncClient:
         merged_opps = merge_opportunity_data(opportunities_raw, pipelines, users, contacts_raw)
         
         # Now fetch consultant pulse (Today/Weekly)
-        consultant_pulse = await self.fetch_consultant_pulse(opportunities=merged_opps, contacts=contacts_raw, payments=payments)
+        # Use end_date as the reference for "Today" metrics
+        consultant_pulse = await self.fetch_consultant_pulse(
+            opportunities=merged_opps, 
+            contacts=contacts_raw, 
+            payments=payments,
+            reference_date=end_date
+        )
         
         # appointments for the original range
         appointments = await self.fetch_all_appointments(start_date, end_date)
