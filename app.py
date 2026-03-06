@@ -16,8 +16,8 @@ import os
 import sys
 
 # Import Async Clients
-from ghl_async_client import ghl_client
-from meta_async_client import fetch_meta_data
+from ghl_async_client import GHLAsyncClient
+from meta_async_client import MetaAsyncClient, fetch_meta_data
 from ga4_async_client import fetch_ga4_data
 from gsc_async_client import fetch_gsc_data
 import statsmodels.api as sm
@@ -25,7 +25,7 @@ import pytz
 
 # --- PAGE CONFIG ---
 st.set_page_config(
-    page_title="The Migration | Marketing Intelligence",
+    page_title="The Migration | Marketing Performance Dashboard",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -47,7 +47,7 @@ def login_gate():
             auth_pass = "1900clients"
             
         st.markdown("<div style='text-align: center; padding-top: 100px;'>", unsafe_allow_html=True)
-        st.title("🔐 Marketing Intelligence Login")
+        st.title("🔐 Marketing Performance Login")
         user = st.text_input("Username")
         pw = st.text_input("Password", type="password")
         if st.button("Login"):
@@ -132,6 +132,21 @@ st.markdown(f"""
         background-color: {surface_color} !important;
     }}
     
+    /* Forced Dark Sidebar */
+    [data-testid="stSidebar"], [data-testid="stSidebar"] div, [data-testid="stSidebar"] p, [data-testid="stSidebar"] span {{
+        background-color: #0f172a !important;
+        color: #f8fafc !important;
+    }}
+    [data-testid="stSidebar"] label[data-baseweb="radio"] div, [data-testid="stSidebar"] label[data-baseweb="checkbox"] div, [data-testid="stSidebar"] label p {{
+        color: #f8fafc !important;
+    }}
+    [data-testid="stSidebar"] div[data-baseweb="select"], [data-testid="stSidebar"] div[data-baseweb="input"] {{
+        background-color: #1e293b !important;
+    }}
+    [data-testid="stSidebar"] input {{
+        color: #f8fafc !important;
+    }}
+
     /* Subheaders */
     .stSubheader > div::after {{
         content: '';
@@ -182,73 +197,65 @@ def load_all_intelligence(start_date, end_date):
     start_str = start_date.strftime('%Y-%m-%d')
     end_str = end_date.strftime('%Y-%m-%d')
     print(f"LOADER DEBUG: Requesting data for range {start_str} to {end_str}")
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
     async def fetch_everything():
-        # Fetching tasks
-        tasks = [
-            ghl_client.fetch_all_data(start_str, end_str),
-            fetch_meta_data(start_str, end_str),
-            fetch_ga4_data(start_str, end_str),
-            fetch_gsc_data(start_str, end_str)
-        ]
-        # return_exceptions=True prevents one failing service from crashing the whole sync
-        return await asyncio.gather(*tasks, return_exceptions=True)
-    
-    try:
-        results = loop.run_until_complete(fetch_everything())
+        # Create fresh client instances for this specific request loop
+        # This prevents loop/session crosstalk between different Streamlit threads
+        local_ghl = GHLAsyncClient()
         
-        # Process results and log any errors
-        processed = []
-        services = ["GHL", "Meta", "GA4", "Search Console"]
-        for i, res in enumerate(results):
-            if isinstance(res, Exception):
-                # Special handling for Meta Ads if country breakdown fails
-                if services[i] == "Meta" and "country" in str(res).lower():
-                    st.warning(f"⚠️ Meta Ads Sync limited: Country breakdown failed. Retrying without breakdown.")
-                    try:
-                        # Attempt to refetch Meta data without country breakdown
-                        meta_fallback_data = loop.run_until_complete(fetch_meta_data(start_str, end_str, breakdown=None))
-                        processed.append(meta_fallback_data)
-                    except Exception as fallback_e:
-                        st.warning(f"⚠️ Meta Ads Sync limited: Fallback without breakdown also failed: {str(fallback_e)}")
-                        processed.append({}) # Provide empty dict for failed service
-                else:
-                    st.warning(f"⚠️ {services[i]} Sync limited: {str(res)}")
-                    processed.append({}) # Provide empty dict for failed service
-            else:
-                processed.append(res)
-                
-        # The GHL client (ghl_async_client) already returns processed 'opportunities'
-        # but leaves contacts relatively raw. Let's ONLY merge contacts here.
-        ghl_raw = processed[0]
-        if ghl_raw and isinstance(ghl_raw, dict) and "contacts" in ghl_raw:
-            from ghl_async_client import merge_contact_data
-            ghl_raw["contacts"] = merge_contact_data(
-                ghl_raw["contacts"], ghl_raw["opportunities"], 
-                ghl_raw["appointments"], ghl_raw["pipelines"], ghl_raw["users"]
+        try:
+            # Fetching tasks
+            # We use asyncio.gather for parallelism
+            results = await asyncio.gather(
+                local_ghl.fetch_all_data(start_str, end_str),
+                fetch_meta_data(start_str, end_str),
+                fetch_ga4_data(start_str, end_str),
+                fetch_gsc_data(start_str, end_str),
+                return_exceptions=True
             )
-            processed[0] = ghl_raw
-                
-        return {
-            "ghl": processed[0], 
-            "meta": processed[1], 
-            "ga4": processed[2], 
-            "gsc": processed[3]
-        }
+            
+            # Map results to structured dictionary
+            processed = []
+            for i, res in enumerate(results):
+                if isinstance(res, Exception):
+                    print(f"Async Task Exception: {res}")
+                    processed.append({}) # Empty data on failure
+                else:
+                    processed.append(res)
+            
+            # Additional GHL processing if needed
+            ghl_raw = processed[0]
+            if ghl_raw and isinstance(ghl_raw, dict) and "contacts" in ghl_raw:
+                from ghl_async_client import merge_contact_data
+                ghl_raw["contacts"] = merge_contact_data(
+                    ghl_raw["contacts"], ghl_raw.get("opportunities", []), 
+                    ghl_raw.get("appointments", []), ghl_raw.get("pipelines", []), ghl_raw.get("users", [])
+                )
+                processed[0] = ghl_raw
+                    
+            return {
+                "ghl": processed[0], 
+                "meta": processed[1], 
+                "ga4": processed[2], 
+                "gsc": processed[3]
+            }
+        finally:
+            # Ensure the GHL session is explicitly closed before the loop finishes
+            await local_ghl.close()
+
+    try:
+        # Use a fresh event loop for each run
+        # asyncio.run is the safest way to ensure loop life-cycle is handled correctly
+        return asyncio.run(fetch_everything())
     except Exception as e:
         error_details = traceback.format_exc()
         st.error(f"Critical Intelligence Sync Failure: {e}")
         with st.expander("Show Technical Details"):
             st.code(error_details)
         return None
-    finally:
-        loop.close()
 
 # --- MAIN LOAD ---
 if len(date_range) == 2:
-    with st.spinner("Synchronizing Global Marketing Intelligence..."):
+    with st.spinner("Synchronizing Global Marketing Performance..."):
         all_data = load_all_intelligence(date_range[0], date_range[1])
 else:
     st.warning("Please select a valid date range.")
@@ -260,7 +267,7 @@ if not all_data:
 # --- CONTENT RENDERING ---
 st.markdown("""
     <div class="brand-header">
-        <h1>Marketing Performance Intelligence</h1>
+        <h1>Marketing Performance Dashboard</h1>
     </div>
 """, unsafe_allow_html=True)
 
@@ -362,7 +369,7 @@ with tabs[1]:
         all_meta_countries = sorted(df_agg_raw['Country'].unique()) if 'Country' in df_agg_raw.columns else []
         ctrl_c1, ctrl_c2 = st.columns([3, 1])
         with ctrl_c1:
-            selected_meta_countries = st.multiselect("Filter by Country", all_meta_countries, default=all_meta_countries[:3] if len(all_meta_countries) > 3 else all_meta_countries, key="meta_country_filt") if all_meta_countries else []
+            selected_meta_countries = st.multiselect("Filter by Country", all_meta_countries, default=[], key="meta_country_filt") if all_meta_countries else []
         with ctrl_c2:
             meta_comparison_mode = st.toggle("Side-by-Side Comparison", key="meta_comp_toggle")
 
@@ -383,9 +390,10 @@ with tabs[1]:
             avg_cpl = t_spend / t_leads if t_leads > 0 else 0
             t_impr = df_f['Impressions'].sum() if 'Impressions' in df_f.columns else 0
             t_links = df_f['Link clicks'].sum() if 'Link clicks' in df_f.columns else 0
-            t_outbound = df_f['Outbound clicks'].sum() if 'Outbound clicks' in df_f.columns else 0
-            avg_ctr_link = df_f['CTR (link click-through rate)'].mean() if 'CTR (link click-through rate)' in df_f.columns else 0
-            avg_ctr_out = (t_outbound / t_impr * 100) if t_impr > 0 else 0
+            t_clicks = df_f['Clicks'].sum() if 'Clicks' in df_f.columns else 0
+            avg_ctr_all = (t_clicks / t_impr * 100) if t_impr > 0 else 0
+            # Link Click-Through Rate - calculate from totals for accuracy
+            avg_ctr_link = (t_links / t_impr * 100) if t_impr > 0 else 0
             
             k1, k2, k3 = st.columns(3)
             with k1: okr_scorecard("Total Spend", f"${t_spend:,.0f}")
@@ -394,18 +402,19 @@ with tabs[1]:
             
             p4, p5, p6 = st.columns(3)
             with p4: okr_scorecard("Link Clicks", f"{int(t_links):,}")
-            with p5: okr_scorecard("Outbound CTR", f"{avg_ctr_out:.2f}%")
+            with p5: okr_scorecard("CTR (all)", f"{avg_ctr_all:.2f}%")
             with p6: okr_scorecard("Link CTR", f"{avg_ctr_link:.2f}%")
 
             st.divider()
 
             # 2. Creative Engagement
             st.markdown(f"### {title_prefix} **2. Creative Engagement (Hook & Hold)**")
-            hook_rate = (df_f['3s Hold'].sum() / t_impr * 100) if t_impr > 0 and '3s Hold' in df_f.columns else 0
-            hold_rate = (df_f['Thruplays'].sum() / t_impr * 100) if t_impr > 0 and 'Thruplays' in df_f.columns else 0
+            t_3s = df_f['3s Hold'].sum() if '3s Hold' in df_f.columns else 0
+            hook_rate = (t_3s / t_impr * 100) if t_impr > 0 else 0
+            hold_rate = (df_f['Thruplays'].sum() / t_3s * 100) if t_3s > 0 and 'Thruplays' in df_f.columns else 0
             vh1, vh2 = st.columns(2)
             with vh1: okr_scorecard("Hook Rate (3s/Impr)", f"{hook_rate:.1f}%")
-            with vh2: okr_scorecard("Hold Rate (Thru/Impr)", f"{hold_rate:.1f}%")
+            with vh2: okr_scorecard("Hold Rate (Thru/3s hold)", f"{hold_rate:.1f}%")
 
             st.divider()
 
@@ -531,7 +540,7 @@ with tabs[2]:
             f_ga1, f_ga2 = st.columns([3, 1])
             with f_ga1:
                 all_ga_countries = sorted(df_daily_raw['Country'].unique()) if 'Country' in df_daily_raw.columns else []
-                sel_ga_countries = st.multiselect("Filter GA4 by Country", all_ga_countries, default=all_ga_countries[:3] if all_ga_countries else [], key="ga4_c_filt")
+                sel_ga_countries = st.multiselect("Filter GA4 by Country", all_ga_countries, default=[], key="ga4_c_filt")
             with f_ga2:
                 ga4_comparison_mode = st.toggle("Side-by-Side Comparison", key="ga4_comp_toggle")
 
@@ -622,22 +631,34 @@ with tabs[2]:
             p1, p2 = st.columns(2) if not ga4_comparison_mode else (st.container(), st.container())
             with p1:
                 st.markdown(f"#### {title_prefix} Top Page Titles")
-                if "page_titles" in ga4:
-                    df_t = pd.DataFrame(ga4["page_titles"])
-                    if countries_to_show:
-                        df_t = df_t[df_t['country'].isin(countries_to_show)] if 'country' in df_t.columns else df_t
-                    if not df_t.empty and 'Page Title' in df_t.columns:
+                if "titles" in ga4 and ga4["titles"]:
+                    df_t = pd.DataFrame(ga4["titles"])
+                    if countries_to_show and 'country' in df_t.columns:
+                        df_t_f = df_t[df_t['country'].isin(countries_to_show)]
+                        # Fallback to all data if filtered result is empty
+                        df_t = df_t_f if not df_t_f.empty else df_t
+                    if 'Page Title' in df_t.columns:
                         df_t_disp = df_t.groupby('Page Title')['Views'].sum().reset_index().sort_values('Views', ascending=False).head(15)
                         st.dataframe(style_df(df_t_disp), use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No page title data available.")
+                else:
+                    st.info("No page title data available.")
             with p2:
                 st.markdown(f"#### {title_prefix} Top Page Paths")
-                if "page_paths" in ga4:
-                    df_p = pd.DataFrame(ga4["page_paths"])
-                    if countries_to_show:
-                        df_p = df_p[df_p['country'].isin(countries_to_show)] if 'country' in df_p.columns else df_p
-                    if not df_p.empty and 'Page Path' in df_p.columns:
+                if "paths" in ga4 and ga4["paths"]:
+                    df_p = pd.DataFrame(ga4["paths"])
+                    if countries_to_show and 'country' in df_p.columns:
+                        df_p_f = df_p[df_p['country'].isin(countries_to_show)]
+                        # Fallback to all data if filtered result is empty
+                        df_p = df_p_f if not df_p_f.empty else df_p
+                    if 'Page Path' in df_p.columns:
                         df_p_disp = df_p.groupby('Page Path')['Views'].sum().reset_index().sort_values('Views', ascending=False).head(15)
                         st.dataframe(style_df(df_p_disp), use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No page path data available.")
+                else:
+                    st.info("No page path data available.")
 
         if ga4_comparison_mode and len(sel_ga_countries) == 2:
             c1, c2 = sel_ga_countries[0], sel_ga_countries[1]
@@ -680,7 +701,7 @@ with tabs[3]:
             f_gs1, f_gs2 = st.columns([3, 1])
             with f_gs1:
                 all_gsc_countries = sorted(df_trend_raw['Country_Code'].unique()) if 'Country_Code' in df_trend_raw.columns else []
-                sel_gsc_countries = st.multiselect("Filter SEO by Country", all_gsc_countries, default=all_gsc_countries[:3] if all_gsc_countries else [], key="gsc_c_filt")
+                sel_gsc_countries = st.multiselect("Filter SEO by Country", all_gsc_countries, default=[], key="gsc_c_filt")
             with f_gs2:
                 seo_comparison_mode = st.toggle("Side-by-Side Comparison", key="seo_comp_toggle")
 
@@ -804,7 +825,7 @@ with tabs[4]:
         all_pipe_countries = sorted(opps['Country'].dropna().unique()) if 'Country' in opps.columns else []
         pc1, pc2 = st.columns([3, 1])
         with pc1:
-            sel_pipe_countries = st.multiselect("Filter Pipeline by Country", all_pipe_countries, default=all_pipe_countries[:3] if len(all_pipe_countries) > 3 else all_pipe_countries, key="pipe_country_filt") if all_pipe_countries else []
+            sel_pipe_countries = st.multiselect("Filter Pipeline by Country", all_pipe_countries, default=[], key="pipe_country_filt") if all_pipe_countries else []
         with pc2:
             pipe_comparison_mode = st.toggle("Side-by-Side Comparison", key="pipe_comp_toggle")
 
@@ -994,8 +1015,8 @@ with tabs[5]:
                 # Removed City filter for consistency with GA4/GSC requirements
                 if 'country' in df_to_filt.columns:
                     geo_options = [str(x) for x in df_to_filt['country'].dropna().unique() if str(x).strip()]
-                    selected_geo = st.multiselect("Filter Attribution by Country", ["All"] + sorted(geo_options), default="All", key="c_country_val")
-                    if "All" not in selected_geo and selected_geo:
+                    selected_geo = st.multiselect("Filter Attribution by Country", sorted(geo_options), default=[], key="c_country_val")
+                    if selected_geo:
                         return df_to_filt[df_to_filt['country'].isin(selected_geo)]
             return df_to_filt
 
@@ -1037,7 +1058,7 @@ with tabs[5]:
 with tabs[6]:
     st.markdown("### **👨‍🏫 Consultant Pulse Leaderboard**")
     
-    # Scorecards
+    # KPI Summary for Capacities
     df_t = pd.DataFrame(consultant_today)
     df_w = pd.DataFrame(consultant_weekly)
     
@@ -1048,11 +1069,11 @@ with tabs[6]:
     <div style='display: flex; justify-content: center; gap: 20px; margin-bottom: 2rem;'>
         <div style='padding: 20px 40px; background: rgba(16,185,129,0.1); border: 1px solid #10b981; border-radius: 12px; box-shadow: 0 0 20px rgba(16,185,129,0.2); text-align: center;'>
             <span style='color: #94a3b8; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.1em;'>Today's Total Workforce</span>
-            <h2 style='color: #10b981; margin: 10px 0 0; font-size: 2.2rem;'>{t_appts} Appointments</h2>
+            <h2 style='color: #10b981; margin: 10px 0 0; font-size: 2.2rem;'>{t_appts} Appts</h2>
         </div>
         <div style='padding: 20px 40px; background: rgba(139,92,252,0.1); border: 1px solid #8b5cfc; border-radius: 12px; box-shadow: 0 0 20px rgba(139,92,252,0.2); text-align: center;'>
-            <span style='color: #94a3b8; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.1em;'>Weekly Total Workforce</span>
-            <h2 style='color: #8b5cfc; margin: 10px 0 0; font-size: 2.2rem;'>{w_appts} Appointments</h2>
+            <span style='color: #94a3b8; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.1em;'>Weekly Total Workforce (7D)</span>
+            <h2 style='color: #8b5cfc; margin: 10px 0 0; font-size: 2.2rem;'>{w_appts} Appts</h2>
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -1073,17 +1094,10 @@ with tabs[6]:
         st.info("No appointment data for today.")
     
     st.divider()
-
+    
     # --- WEEKLY SECTION ---
     st.markdown("### **📆 Weekly Consultant Capacity (Last 7 Rolling Days)**")
     
-    # User requested print statements for tracking this window
-    print(f"\n[CONSULTANT TRACKER] Weekly Window: Rolling 7 Days")
-    print(f"--- Data Points: {len(df_w)}")
-    if not df_w.empty:
-        top_c = df_w.sort_values('total_appointments', ascending=False).iloc[0]['consultant_name']
-        print(f"--- Peak Performance: {top_c} ({df_w.sort_values('total_appointments', ascending=False).iloc[0]['total_appointments']} appts)")
-
     if not df_w.empty:
         fig_w = px.bar(df_w.sort_values('total_appointments'), x="total_appointments", y="consultant_name", 
                         orientation='h', title="Appointments per Consultant (Weekly Rolling 7D)", color="total_appointments", color_continuous_scale="Greens", labels={'consultant_name': 'Consultant', 'total_appointments': 'Appointments'})
