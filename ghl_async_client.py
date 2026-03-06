@@ -308,48 +308,57 @@ class GHLAsyncClient:
         end_ms = int(end_dt.timestamp() * 1000)
 
         session = await self.get_session()
+        sem = asyncio.Semaphore(5) # Limit concurrency to avoid 429
         
         async def fetch_for_calendar(cal_id: str, name: str) -> List[Dict]:
-            url = f"{BASE_URL}/calendars/events"
-            params = {
-                "locationId": GHL_LOCATION_ID,
-                "calendarId": cal_id,
-                "startTime": start_ms,
-                "endTime": end_ms
-            }
-            
-            cal_events = []
-            start_after_id = None
-            start_after = None
-            
-            while True:
-                query_params = params.copy()
-                if start_after_id and start_after:
-                    query_params["startAfterId"] = start_after_id
-                    query_params["startAfter"] = start_after
+            async with sem:
+                url = f"{BASE_URL}/calendars/events"
+                params = {
+                    "locationId": GHL_LOCATION_ID,
+                    "calendarId": cal_id,
+                    "startTime": start_ms,
+                    "endTime": end_ms
+                }
                 
-                try:
-                    async with session.get(url, params=query_params) as response:
-                        if response.status != 200:
-                            break
-                        
-                        data = await response.json()
-                        events = data.get("events", [])
-                        if not events:
-                            break
-                        
-                        cal_events.extend(events)
-                        
-                        meta = data.get("meta", {})
-                        start_after_id = meta.get("nextPageId") or meta.get("startAfterId")
-                        start_after = meta.get("nextPageStart") or meta.get("startAfter")
-                        
-                        if not start_after_id:
-                            break
-                except Exception as e:
-                    print(f"Error fetching for {name}: {e}")
-                    break
-            return cal_events
+                cal_events = []
+                start_after_id = None
+                start_after = None
+                
+                while True:
+                    query_params = params.copy()
+                    if start_after_id and start_after:
+                        query_params["startAfterId"] = start_after_id
+                        query_params["startAfter"] = start_after
+                    
+                    try:
+                        async with session.get(url, params=query_params) as response:
+                            if response.status == 429:
+                                print(f"[GHL 429] Rate limited on {name}, waiting 2s...")
+                                await asyncio.sleep(2)
+                                continue # Retry
+                                
+                            if response.status != 200:
+                                print(f"[GHL ERROR] Failed fetch for {name}: {response.status}")
+                                break
+                                
+                            data = await response.json()
+                            events = data.get("events", [])
+                            
+                            if not events:
+                                break
+                            
+                            cal_events.extend(events)
+                            
+                            meta = data.get("meta", {})
+                            start_after_id = meta.get("nextPageId") or meta.get("startAfterId")
+                            start_after = meta.get("nextPageStart") or meta.get("startAfter")
+                            
+                            if not start_after_id:
+                                break
+                    except Exception as e:
+                        print(f"Error fetching for {name}: {e}")
+                        break
+                return cal_events
 
         # Dynamically discover all calendars
         all_calendars = await self.fetch_all_calendars()
@@ -599,7 +608,7 @@ class GHLAsyncClient:
         
         return {
             "contacts": contacts_raw,
-            "opportunities": merged_opps, # Return merged
+            "opportunities": merged_opps, 
             "appointments": appointments,
             "pipelines": pipelines,
             "users": users,
@@ -627,8 +636,7 @@ class GHLAsyncClient:
         print("Cache invalidated")
 
 
-# ==================== GLOBAL CLIENT INSTANCE ====================
-ghl_client = GHLAsyncClient()
+# Clients are now instantiated locally per-request for thread safety
 
 
 # ==================== HELPER FUNCTIONS ====================
